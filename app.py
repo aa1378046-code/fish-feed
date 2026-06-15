@@ -1,610 +1,562 @@
-import uvicorn
-from fastapi import FastAPI, Request, Form, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from datetime import datetime
-import uuid
+from flask import Flask, request, redirect, render_template_string, make_response, jsonify
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+import sqlite3
 import random
 import string
-from contextlib import contextmanager
+from datetime import datetime
 
-# ---------- База данных ----------
-Base = declarative_base()
+app = Flask(__name__)
+app.secret_key = 'supersecretkey_albek_fish_feed_2025'
 
+DB_PATH = '/home/Daud8642/fish_feed.db'
 
-class QRCode(Base):
-    __tablename__ = "qr_codes"
-    id = Column(Integer, primary_key=True)
-    code = Column(String(255), unique=True, nullable=False)
-    status = Column(String(50), default="active")
-    scanned_at = Column(DateTime, nullable=True)
-    tokens_value = Column(Integer, default=10)
+# ЕДИНЫЙ СПИСОК НАГРАД (и для главной, и для магазина)
+REWARDS = [
+    {'tokens': 0, 'name': '🐟 малёк', 'size': 30, 'icon': '🐟', 'product': None},
+    {'tokens': 100, 'name': '🐠 средняя', 'size': 50, 'icon': '🐠', 'product': 'Маленькая пачка корма'},
+    {'tokens': 250, 'name': '🐡 крупная', 'size': 72, 'icon': '🐡', 'product': 'Средняя пачка корма'},
+    {'tokens': 500, 'name': '🐋 гигант', 'size': 100, 'icon': '🐋', 'product': 'Большая пачка корма'},
+    {'tokens': 750, 'name': '🏆 легенда', 'size': 130, 'icon': '🏆', 'product': 'Удочка'},
+    {'tokens': 1000, 'name': '👑 золотая', 'size': 160, 'icon': '👑🐟', 'product': 'Золотая рыбка'}
+]
 
+# Товары для магазина (берутся из REWARDS, исключая нулевой уровень)
+def get_shop_products():
+    return [
+        {
+            'product_name': r['product'], 
+            'tokens': r['tokens'],
+            'fish_icon': r['icon'],
+            'fish_name': r['name']
+        }
+        for r in REWARDS if r['tokens'] > 0
+    ]
 
-class Transaction(Base):
-    __tablename__ = "transactions"
-    id = Column(Integer, primary_key=True)
-    qr_code_id = Column(Integer, ForeignKey("qr_codes.id"))
-    user_session = Column(String(255))
-    tokens_awarded = Column(Integer)
-    scanned_at = Column(DateTime, default=datetime.utcnow)
-
-
-class UserToken(Base):
-    __tablename__ = "user_tokens"
-    id = Column(Integer, primary_key=True)
-    session_id = Column(String(255), unique=True)
-    total_tokens = Column(Integer, default=0)
-    last_updated = Column(DateTime, default=datetime.utcnow)
-
-
-engine = create_engine('sqlite:///fish_feed.db', connect_args={"check_same_thread": False})
-Base.metadata.create_all(bind=engine)
-SessionLocal = sessionmaker(bind=engine)
-
-
-@contextmanager
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# ---------- FastAPI ----------
-app = FastAPI(title="Fish Feed Tokens")
-
-
-# ---------- Генератор кодов ----------
 def generate_unique_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
 
+def generate_exchange_code():
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
-# ========== ГЛАВНАЯ СТРАНИЦА ==========
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        session_id = str(uuid.uuid4())
-    with get_db() as db:
-        user_tokens = db.query(UserToken).filter_by(session_id=session_id).first()
-        if not user_tokens:
-            user_tokens = UserToken(session_id=session_id, total_tokens=0)
-            db.add(user_tokens)
-            db.commit()
-        tokens = user_tokens.total_tokens
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, login TEXT UNIQUE, password TEXT, created_at TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS qr_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE, status TEXT DEFAULT 'active', scanned_at TIMESTAMP, tokens_value INTEGER DEFAULT 10, activated_by INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, qr_code_id INTEGER, user_id INTEGER, tokens_awarded INTEGER, scanned_at TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE, total_tokens INTEGER DEFAULT 0, last_updated TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS prize_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, product_name TEXT, product_tokens INTEGER, exchange_code TEXT, status TEXT DEFAULT 'pending', created_at TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id))''')
+    conn.commit()
+    conn.close()
 
-    html_content = f"""
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes, viewport-fit=cover">
-    <title>Fish Feed — расти рыбу за токены</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            background: linear-gradient(160deg, #d4f1f9 0%, #a0d8ef 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-            padding: 12px;
-        }}
-        .lake-card {{
-            max-width: 500px;
-            width: 100%;
-            background: rgba(255,255,255,0.3);
-            backdrop-filter: blur(2px);
-            border-radius: 48px 48px 36px 36px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-            padding: 16px 16px 32px;
-        }}
-        .lake {{
-            background: radial-gradient(circle at 30% 40%, #3b9ec7, #1e6f96);
-            border-radius: 80px 80px 60px 60px;
-            min-height: 280px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            margin-bottom: 20px;
-            position: relative;
-            overflow: hidden;
-        }}
-        .lake::before {{
-            content: "";
-            position: absolute;
-            bottom: 0;
-            width: 100%;
-            height: 40px;
-            background: repeating-linear-gradient(transparent 0px, transparent 18px, rgba(255,255,240,0.2) 18px, rgba(255,255,240,0.3) 28px);
-        }}
-        .fish {{
-            transition: all 0.3s cubic-bezier(0.34, 1.2, 0.64, 1);
-            filter: drop-shadow(0 8px 12px rgba(0,0,0,0.2));
-        }}
-        .balance-panel {{
-            background: white;
-            border-radius: 60px;
-            padding: 12px 20px;
-            text-align: center;
-            margin-bottom: 20px;
-        }}
-        .balance-label {{
-            font-size: 13px;
-            letter-spacing: 1px;
-            color: #2c7a47;
-            font-weight: 600;
-        }}
-        .token-count {{
-            font-size: 44px;
-            font-weight: 800;
-            color: #f5b042;
-            line-height: 1;
-        }}
-        .next-reward {{
-            background: rgba(255,255,245,0.95);
-            border-radius: 32px;
-            padding: 14px;
-            margin-bottom: 20px;
-        }}
-        .progress-bar-bg {{
-            background: #e0e7e3;
-            border-radius: 40px;
-            height: 10px;
-            margin: 10px 0 6px;
-            overflow: hidden;
-        }}
-        .progress-fill {{
-            background: #ffb347;
-            width: 0%;
-            height: 100%;
-            border-radius: 40px;
-            transition: width 0.3s;
-        }}
-        .actions {{
-            display: flex;
-            gap: 12px;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin-top: 8px;
-        }}
-        .btn {{
-            flex: 1;
-            min-width: 140px;
-            text-align: center;
-            padding: 14px 0;
-            border-radius: 60px;
-            font-weight: 600;
-            text-decoration: none;
-            font-size: 16px;
-            background: white;
-            color: #1f6e43;
-            cursor: pointer;
-            border: none;
-        }}
-        .btn-primary {{
-            background: #2c7a47;
-            color: white;
-            border: none;
-            box-shadow: 0 4px 0 #1b5230;
-        }}
-        .btn-primary:active {{
-            transform: translateY(2px);
-            box-shadow: 0 1px 0 #1b5230;
-        }}
-        .milestones {{
-            margin-top: 20px;
-            background: rgba(255,255,250,0.85);
-            border-radius: 32px;
-            padding: 12px 16px;
-        }}
-        .milestone-item {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 8px 0;
-            border-bottom: 1px solid rgba(0,0,0,0.05);
-            font-size: 14px;
-            flex-wrap: wrap;
-            gap: 6px;
-        }}
-        .milestone-tokens {{
-            font-weight: 700;
-            color: #f5a623;
-        }}
-        .input-group {{
-            margin-top: 16px;
-            display: flex;
-            gap: 10px;
-        }}
-        .code-input {{
-            flex: 2;
-            padding: 14px;
-            border-radius: 60px;
-            border: none;
-            font-size: 16px;
-            text-align: center;
-            font-family: monospace;
-            letter-spacing: 2px;
-        }}
-        @media (max-width: 480px) {{
-            .lake {{ min-height: 220px; }}
-            .token-count {{ font-size: 36px; }}
-            .btn {{ padding: 12px 0; font-size: 14px; min-width: 120px; }}
-        }}
-    </style>
-</head>
-<body>
-<div class="lake-card">
-    <div class="lake"><div class="fish" id="fishEmoji" style="font-size:30px;">🐟</div></div>
-    <div class="balance-panel">
-        <div class="balance-label">ТВОИ ТОКЕНЫ</div>
-        <div class="token-count"><span id="tokenValue">{tokens}</span> 🪙</div>
-    </div>
-    <div class="next-reward" id="nextRewardBox">
-        <div style="font-size:13px; font-weight:600;">🎁 ДО СЛЕДУЮЩЕЙ НАГРАДЫ</div>
-        <div id="nextPrizeName" style="font-weight:700; margin:6px 0;">—</div>
-        <div class="progress-bar-bg"><div class="progress-fill" id="progressFill"></div></div>
-        <div style="display: flex; justify-content: space-between; font-size: 12px;">
-            <span id="currentTokensLabel">{tokens}</span>
-            <span id="targetTokensLabel">0</span>
-        </div>
-    </div>
+init_db()
 
-    <div class="actions">
-        <button onclick="showCodeInput()" class="btn btn-primary">🔑 Ввести код</button>
-        <a href="/shop" class="btn">🛒 Магазин</a>
-    </div>
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login_page'
 
-    <div id="codeInputArea" style="display: none; margin-top: 16px;">
-        <div class="input-group">
-            <input type="text" id="codeInput" class="code-input" placeholder="例如: ABC123DEF456" maxlength="12">
-            <button onclick="submitCode()" class="btn" style="flex:1; background:#2c7a47; color:white; box-shadow:none;">Активировать</button>
-        </div>
-        <div style="font-size:12px; text-align:center; margin-top:8px; color:#555;">Введите 12-значный код с пачки корма</div>
-    </div>
+class User(UserMixin):
+    def __init__(self, id, login):
+        self.id = id
+        self.login = login
 
-    <div class="milestones">
-        <div style="font-size:13px; font-weight:600; margin-bottom:8px;">🐟 Рост рыбы:</div>
-        <div class="milestone-item"><span>🐟 малёк</span><span class="milestone-tokens">0 🪙</span></div>
-        <div class="milestone-item"><span>🐠 средняя</span><span class="milestone-tokens">100 🪙</span></div>
-        <div class="milestone-item"><span>🐡 крупная</span><span class="milestone-tokens">250 🪙</span></div>
-        <div class="milestone-item"><span>🐋 гигант</span><span class="milestone-tokens">500 🪙</span></div>
-        <div class="milestone-item"><span>🏆 легенда</span><span class="milestone-tokens">750 🪙</span></div>
-        <div class="milestone-item"><span>👑 золотая</span><span class="milestone-tokens">1000 🪙</span></div>
-    </div>
-</div>
+@login_manager.user_loader
+def load_user(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, login FROM users WHERE id = ?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return User(row[0], row[1])
+    return None
 
-<script>
-    const rewardLevels = [
-        {{ '{{' }} tokens: 0, prize: "Начинай копить!", size: 30, fishIcon: "🐟" }},
-        {{ '{{' }} tokens: 100, prize: "Маленькая пачка корма", size: 50, fishIcon: "🐠" }},
-        {{ '{{' }} tokens: 250, prize: "Средняя пачка корма", size: 72, fishIcon: "🐡" }},
-        {{ '{{' }} tokens: 500, prize: "Большая пачка корма", size: 100, fishIcon: "🐋" }},
-        {{ '{{' }} tokens: 750, prize: "Удочка", size: 130, fishIcon: "🏆" }},
-        {{ '{{' }} tokens: 1000, prize: "Золотая рыбка", size: 160, fishIcon: "👑🐟" }}
-    ];
-    let currentTokens = {tokens};
+def get_user_tokens(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT total_tokens FROM user_tokens WHERE user_id = ?', (user_id,))
+    row = c.fetchone()
+    if not row:
+        c.execute('INSERT INTO user_tokens (user_id, total_tokens, last_updated) VALUES (?,?,?)', (user_id, 0, datetime.now()))
+        conn.commit()
+        tokens = 0
+    else:
+        tokens = row[0]
+    conn.close()
+    return tokens
 
-    function showCodeInput() {{
-        const area = document.getElementById('codeInputArea');
-        area.style.display = area.style.display === 'none' ? 'block' : 'none';
-    }}
+def get_progress_info(tokens):
+    current_level_index = 0
+    for i in range(len(REWARDS) - 1, -1, -1):
+        if tokens >= REWARDS[i]['tokens']:
+            current_level_index = i
+            break
+    
+    if current_level_index + 1 < len(REWARDS):
+        next_level = REWARDS[current_level_index + 1]
+        tokens_to_next = next_level['tokens'] - tokens
+        range_size = next_level['tokens'] - REWARDS[current_level_index]['tokens']
+        progress = tokens - REWARDS[current_level_index]['tokens']
+        percent = int((progress / range_size) * 100) if range_size > 0 else 0
+    else:
+        next_level = {'name': '🥳 МАКСИМУМ', 'tokens': tokens}
+        tokens_to_next = 0
+        percent = 100
+    
+    return {
+        'current_level': REWARDS[current_level_index],
+        'current_level_index': current_level_index,
+        'next_level': next_level,
+        'tokens_to_next': tokens_to_next,
+        'percent': min(100, max(0, percent))
+    }
 
-    async function submitCode() {{
-        const code = document.getElementById('codeInput').value.trim().toUpperCase();
-        if (!code) {{
-            alert('Введите код с пачки корма');
-            return;
-        }}
+# ==================== HTML ШАБЛОНЫ ====================
 
-        document.getElementById('codeInputArea').style.display = 'none';
-        const resultDiv = document.getElementById('nextRewardBox');
-        const originalHTML = resultDiv.innerHTML;
-        resultDiv.innerHTML = '<div style="text-align:center;">⏳ Проверка кода...</div>';
-
-        try {{
-            const res = await fetch('/api/scan', {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ data: code }})
-            }});
-            const data = await res.json();
-            if (data.success) {{
-                resultDiv.innerHTML = '<div style="text-align:center; color:green;">✅ ' + data.message + '</div>';
-                currentTokens = data.tokens;
-                document.getElementById('tokenValue').innerText = currentTokens;
-                updateLakeAndProgress();
-                setTimeout(() => window.location.reload(), 2000);
-            }} else {{
-                resultDiv.innerHTML = '<div style="text-align:center; color:red;">❌ ' + data.message + '</div>';
-                setTimeout(() => {{ resultDiv.innerHTML = originalHTML; }}, 2000);
-            }}
-        }} catch(err) {{
-            resultDiv.innerHTML = '<div style="text-align:center; color:red;">❌ Ошибка сервера</div>';
-            setTimeout(() => {{ resultDiv.innerHTML = originalHTML; }}, 2000);
-        }}
-        document.getElementById('codeInput').value = '';
-    }}
-
-    function updateLakeAndProgress() {{
-        let currentLevel = rewardLevels[0];
-        let nextLevel = rewardLevels[1];
-        for (let i = rewardLevels.length-1; i >= 0; i--) {{
-            if (currentTokens >= rewardLevels[i].tokens) {{
-                currentLevel = rewardLevels[i];
-                nextLevel = rewardLevels[i+1] || null;
-                break;
-            }}
-        }}
-        const fish = document.getElementById('fishEmoji');
-        fish.style.fontSize = currentLevel.size + 'px';
-        fish.innerHTML = currentLevel.fishIcon;
-        const nextPrizeDiv = document.getElementById('nextPrizeName');
-        const targetSpan = document.getElementById('targetTokensLabel');
-        const progressFill = document.getElementById('progressFill');
-        if (nextLevel) {{
-            nextPrizeDiv.innerHTML = nextLevel.prize + ` (${{nextLevel.tokens}} 🪙)`;
-            targetSpan.innerText = nextLevel.tokens;
-            let prev = currentLevel.tokens;
-            let range = nextLevel.tokens - prev;
-            let progress = currentTokens - prev;
-            let percent = Math.min(100, Math.max(0, (progress/range)*100));
-            progressFill.style.width = percent + '%';
-        }} else {{
-            nextPrizeDiv.innerHTML = "🥳 ВСЕ ПРИЗЫ ПОЛУЧЕНЫ!";
-            progressFill.style.width = '100%';
-        }}
-        document.getElementById('currentTokensLabel').innerText = currentTokens;
-    }}
-
-    async function refreshBalance() {{
-        try {{
-            const res = await fetch('/api/balance');
-            const data = await res.json();
-            if (data.tokens !== undefined && data.tokens !== currentTokens) {{
-                currentTokens = data.tokens;
-                document.getElementById('tokenValue').innerText = currentTokens;
-                updateLakeAndProgress();
-            }}
-        }} catch(e) {{}}
-    }}
-
-    updateLakeAndProgress();
-    setInterval(refreshBalance, 3000);
-
-    document.getElementById('codeInput').addEventListener('keypress', function(e) {{
-        if (e.key === 'Enter') submitCode();
-    }});
-</script>
-</body>
-</html>
-    """
-    response = HTMLResponse(html_content)
-    response.set_cookie(key="session_id", value=session_id)
-    return response
-
-
-# ========== API БАЛАНСА ==========
-@app.get("/api/balance")
-async def get_balance(request: Request):
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        return {"tokens": 0}
-    with get_db() as db:
-        user_tokens = db.query(UserToken).filter_by(session_id=session_id).first()
-        tokens = user_tokens.total_tokens if user_tokens else 0
-    return {"tokens": tokens}
-
-
-# ========== API АКТИВАЦИИ КОДА ==========
-@app.post("/api/scan")
-async def scan_qr(qr_data: dict, request: Request):
-    code = qr_data.get("data")
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        return {"success": False, "message": "Сессия не найдена"}
-    with get_db() as db:
-        qr_record = db.query(QRCode).filter_by(code=code).first()
-        if not qr_record:
-            return {"success": False, "message": "❌ Неверный код"}
-        if qr_record.status == "used":
-            return {"success": False, "message": "⚠️ Этот код уже был активирован"}
-        existing = db.query(Transaction).filter_by(qr_code_id=qr_record.id, user_session=session_id).first()
-        if existing:
-            return {"success": False, "message": "⚠️ Вы уже активировали этот код"}
-        tokens = qr_record.tokens_value
-        qr_record.status = "used"
-        qr_record.scanned_at = datetime.now()
-        transaction = Transaction(qr_code_id=qr_record.id, user_session=session_id, tokens_awarded=tokens)
-        db.add(transaction)
-        user_tokens = db.query(UserToken).filter_by(session_id=session_id).first()
-        if not user_tokens:
-            user_tokens = UserToken(session_id=session_id, total_tokens=0)
-            db.add(user_tokens)
-        user_tokens.total_tokens += tokens
-        user_tokens.last_updated = datetime.now()
-        db.commit()
-        return {"success": True, "message": f"✅ Вы получили {tokens} токенов!", "tokens": user_tokens.total_tokens}
-
-
-# ========== МАГАЗИН ==========
-@app.get("/shop", response_class=HTMLResponse)
-async def shop(request: Request):
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        return RedirectResponse(url="/")
-    with get_db() as db:
-        user_tokens = db.query(UserToken).filter_by(session_id=session_id).first()
-        tokens = user_tokens.total_tokens if user_tokens else 0
-    products = [
-        {"name": "🐟 Маленькая пачка корма", "tokens": 100},
-        {"name": "🐠 Средняя пачка корма", "tokens": 250},
-        {"name": "🐡 Большая пачка корма", "tokens": 500},
-        {"name": "🎣 Удочка", "tokens": 750},
-        {"name": "🏆 Золотая рыбка (приз)", "tokens": 1000}
-    ]
-    html = f"""
+REGISTER_PAGE = '''
 <!DOCTYPE html>
 <html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Магазин призов</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            background: linear-gradient(160deg, #d4f1f9, #a0d8ef);
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            padding: 20px;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }}
-        .shop-container {{
-            max-width: 500px;
-            width: 100%;
-            background: rgba(255,255,255,0.9);
-            border-radius: 48px;
-            padding: 24px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-        }}
-        .balance {{
-            background: #2c7a47;
-            color: white;
-            padding: 16px;
-            border-radius: 60px;
-            text-align: center;
-            margin-bottom: 24px;
-            font-weight: bold;
-        }}
-        .product {{
-            background: white;
-            border-radius: 24px;
-            padding: 16px;
-            margin-bottom: 12px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-        }}
-        .product-name {{ font-size: 16px; font-weight: 500; }}
-        .product-tokens {{ color: #f5a623; font-weight: bold; }}
-        button {{
-            background: #2c7a47;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 40px;
-            font-weight: bold;
-            cursor: pointer;
-        }}
-        button:disabled {{ background: #ccc; cursor: not-allowed; }}
-        .back-btn {{
-            display: block;
-            text-align: center;
-            margin-top: 20px;
-            color: #1f6e43;
-            text-decoration: none;
-        }}
-    </style>
-</head>
-<body>
-<div class="shop-container">
-    <div class="balance">💰 Ваши токены: {tokens} 🪙</div>
-    <h2 style="margin-bottom:16px;">🎁 Обмен на призы</h2>
-"""
-    for p in products:
-        disabled = "disabled" if tokens < p["tokens"] else ""
-        html += f"""
-    <div class="product">
-        <div><div class="product-name">{p['name']}</div><div class="product-tokens">{p['tokens']} токенов</div></div>
-        <button onclick="exchange('{p['name']}', {p['tokens']})" {disabled}>Обменять</button>
-    </div>
-"""
-    html += f"""
-    <a href="/" class="back-btn">← На главную</a>
-</div>
-<script>
-    function exchange(name, cost) {{
-        if (confirm(`Обменять ${{name}} за ${{cost}} токенов?`)) {{
-            alert("Скажите этот код продавцу: " + Math.random().toString(36).substr(2, 8).toUpperCase() + "\\n\\nПокажите Альбеку и получите приз!");
-        }}
-    }}
-</script>
-</body>
-</html>
-    """
-    return HTMLResponse(html)
-
-
-# ========== АДМИНКА ==========
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_panel(request: Request):
-    password = request.query_params.get("password")
-    if password != "albek123":
-        return HTMLResponse("Доступ запрещён. Используйте ?password=albek123", status_code=403)
-    with get_db() as db:
-        qr_codes = db.query(QRCode).all()
-        stats = {"total": len(qr_codes), "active": len([q for q in qr_codes if q.status == "active"]),
-                 "used": len([q for q in qr_codes if q.status == "used"])}
-    rows = "".join(
-        f"<tr><td>{c.id}</td><td>{c.code}</td><td>{c.status}</td><td>{c.tokens_value}</td><td>{c.scanned_at or '—'}</td></tr>"
-        for c in qr_codes)
-    html = f"""
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><title>Админка</title><style>
-    body {{ font-family: monospace; padding: 20px; background: #f0f0f0; }}
-    table {{ border-collapse: collapse; width: 100%; background: white; }}
-    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-    th {{ background: #4CAF50; color: white; }}
-    .stats {{ background: #e0e0e0; padding: 10px; margin-bottom: 20px; }}
-    form {{ margin-bottom: 30px; }}
-    input, button {{ padding: 8px; margin: 5px; }}
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Регистрация</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.container{max-width:400px;margin:50px auto;background:white;border-radius:48px;padding:30px;text-align:center}
+input{width:100%;padding:12px;margin:10px 0;border-radius:30px;border:1px solid #ccc}
+button{background:#2c7a47;color:white;padding:12px;border:none;border-radius:30px;width:100%;cursor:pointer}
+.error{color:red}
+.success{color:green}
+.back{margin-top:20px;display:block;color:#1f6e43}
 </style></head>
-<body>
-<h1>Админ панель Альбека</h1>
-<div class="stats">Всего: {stats['total']} | Активных: {stats['active']} | Использованных: {stats['used']}</div>
-<h2>Создать коды</h2>
-<form method="post" action="/admin/generate">
-    <input type="number" name="count" value="10" min="1"> штук
-    <input type="number" name="tokens" value="10" min="1"> токенов
-    <button type="submit">Сгенерировать</button>
-</form>
-<h2>Существующие коды (для печати на пачках)</h2>
-<a href="/admin/codes/export">📥 Скачать CSV</a>
-<table><tr><th>ID</th><th>Код (напечатайте на пачке)</th><th>Статус</th><th>Токены</th><th>Активирован</th></tr>{rows}</table>
-</body>
-</html>
-    """
-    return HTMLResponse(html)
+<body><div class="container"><h1>📝 Регистрация</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if success %}<p class="success">{{ success }}</p>{% endif %}
+<form method="post"><input type="text" name="login" placeholder="Логин" required><input type="password" name="password" placeholder="Пароль (от 4 до 30 символов)" required><button type="submit">Зарегистрироваться</button></form>
+<a href="/login" class="back">Уже есть аккаунт? Войти</a><a href="/" class="back">← На главную</a></div></body></html>
+'''
 
+LOGIN_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Вход</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.container{max-width:400px;margin:50px auto;background:white;border-radius:48px;padding:30px;text-align:center}
+input{width:100%;padding:12px;margin:10px 0;border-radius:30px;border:1px solid #ccc}
+button{background:#2c7a47;color:white;padding:12px;border:none;border-radius:30px;width:100%;cursor:pointer}
+.error{color:red}
+.back{margin-top:20px;display:block;color:#1f6e43}
+</style></head>
+<body><div class="container"><h1>🔐 Вход</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post"><input type="text" name="login" placeholder="Логин" required><input type="password" name="password" placeholder="Пароль" required><button type="submit">Войти</button></form>
+<a href="/register" class="back">Нет аккаунта? Зарегистрироваться</a><a href="/" class="back">← На главную</a></div></body></html>
+'''
 
-@app.post("/admin/generate")
-async def generate_qr_codes(count: int = Form(10), tokens: int = Form(10)):
-    with get_db() as db:
-        for _ in range(min(count, 100)):
-            code = generate_unique_code()
-            db.add(QRCode(code=code, status="active", tokens_value=tokens))
-        db.commit()
-    return RedirectResponse(url="/admin?password=albek123", status_code=303)
+MAIN_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Fish Feed</title><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);min-height:100vh;display:flex;justify-content:center;align-items:center;font-family:sans-serif;padding:12px}
+.lake-card{max-width:500px;width:100%;background:rgba(255,255,255,0.3);backdrop-filter:blur(2px);border-radius:48px;padding:16px}
+.lake{background:radial-gradient(circle at 30% 40%,#3b9ec7,#1e6f96);border-radius:80px;min-height:280px;display:flex;justify-content:center;align-items:center;margin-bottom:20px;position:relative;overflow:hidden}
+.lake::before{content:"";position:absolute;bottom:0;width:100%;height:40px;background:repeating-linear-gradient(transparent 0px,transparent 18px,rgba(255,255,240,0.2) 18px,rgba(255,255,240,0.3) 28px)}
+.fish{transition:all 0.3s;filter:drop-shadow(0 8px 12px rgba(0,0,0,0.2))}
+.balance-panel{background:white;border-radius:60px;padding:12px;text-align:center;margin-bottom:20px}
+.token-count{font-size:44px;font-weight:800;color:#f5b042}
+.next-reward{background:rgba(255,255,245,0.95);border-radius:32px;padding:14px;margin-bottom:20px}
+.progress-bar-bg{background:#e0e7e3;border-radius:40px;height:12px;margin:10px 0;overflow:hidden}
+.progress-fill{background:#ffb347;width:0%;height:100%;transition:width 0.3s}
+.actions{display:flex;gap:12px;margin-top:8px}
+.btn{flex:1;text-align:center;padding:14px 0;border-radius:60px;font-weight:600;text-decoration:none;background:white;color:#1f6e43;cursor:pointer;border:none}
+.btn-primary{background:#2c7a47;color:white;box-shadow:0 4px 0 #1b5230}
+.code-input{width:100%;padding:12px;border-radius:60px;border:none;text-align:center;font-family:monospace;margin-top:10px}
+.milestones{margin-top:20px;background:rgba(255,255,250,0.85);border-radius:32px;padding:12px}
+.milestone-item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.05)}
+.milestone-name{display:flex;align-items:center;gap:8px}
+.milestone-tokens{font-family:monospace;min-width:60px;text-align:right}
+.user-info{margin-bottom:15px;font-size:14px;color:#2c7a47;text-align:center}
+.nav-links{display:flex;gap:15px;justify-content:center;margin-bottom:10px}
+.nav-links a{color:#2c7a47;text-decoration:none}
+</style></head>
+<body><div class="lake-card"><div class="user-info">👤 {{ login }} | <a href="/logout" style="color:#2c7a47;">Выйти</a></div>
+<div class="nav-links"><a href="/main">🏠 Главная</a> | <a href="/shop">🛒 Магазин</a> | <a href="/history">📜 История</a></div>
+<div class="lake"><div class="fish" id="fishEmoji" style="font-size: {{ fish_size }}px;">{{ fish_icon }}</div></div>
+<div class="balance-panel"><div class="token-count">{{ tokens }} 🪙</div></div>
+<div class="next-reward"><div>🎁 Следующая награда: {{ next_level_name }}</div><div>Осталось: {{ tokens_to_next }} 🪙</div><div class="progress-bar-bg"><div class="progress-fill" style="width: {{ progress_percent }}%;"></div></div></div>
+<div class="actions"><button onclick="showInput()" class="btn btn-primary">🔑 Ввести код</button></div>
+<div id="codeInputArea" style="display:none;"><input type="text" id="codeInput" class="code-input" placeholder="Введите код с пачки"><button onclick="submitCode()" class="btn btn-primary" style="margin-top:10px;">Активировать</button></div>
+<div class="milestones"><div>🐟 Размер рыбы:</div>
+{% for r in rewards %}
+<div class="milestone-item">
+    <div class="milestone-name">{{ r.icon }} {{ r.name }}</div>
+    <div class="milestone-tokens">{{ r.tokens }} 🪙</div>
+</div>
+{% endfor %}
+</div></div>
+<script>
+function showInput(){var a=document.getElementById('codeInputArea');a.style.display=a.style.display==='none'?'block':'none'}
+async function submitCode(){var c=document.getElementById('codeInput').value.trim().toUpperCase();if(!c){alert('Введите код');return}
+var r=await fetch('/activate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'code='+encodeURIComponent(c)})
+var d=await r.json();alert(d.message);if(d.success)location.reload()}
+</script></body></html>
+'''
 
+SHOP_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Магазин</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.shop-container{max-width:500px;margin:0 auto;background:rgba(255,255,255,0.9);border-radius:48px;padding:24px}
+.balance{background:#2c7a47;color:white;padding:16px;border-radius:60px;text-align:center;margin-bottom:24px}
+.product{background:white;border-radius:24px;padding:16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
+button{background:#2c7a47;color:white;border:none;padding:10px 20px;border-radius:40px;cursor:pointer}
+button:disabled{background:#ccc}
+.back-btn{display:block;text-align:center;margin-top:20px;color:#1f6e43}
+.user-info{margin-bottom:15px;font-size:14px;text-align:center}
+.nav-links{display:flex;gap:15px;justify-content:center;margin-bottom:15px}
+.nav-links a{color:#2c7a47;text-decoration:none}
+</style></head>
+<body><div class="shop-container"><div class="user-info">👤 {{ login }} | <a href="/logout" style="color:#1f6e43;">Выйти</a></div>
+<div class="nav-links"><a href="/main">🏠 Главная</a> | <a href="/shop">🛒 Магазин</a> | <a href="/history">📜 История</a></div>
+<div class="balance">💰 Ваши токены: {{ tokens }} 🪙</div>
+<p style="margin-bottom:16px;">🎁 Обменяйте токены на товары:</p>
+{% for p in products %}
+<div class="product">
+    <div>
+        <strong>{{ p.fish_icon }} = {{ p.product_name }}</strong>
+    </div>
+    <div style="text-align:right;">
+        <div>{{ p.tokens }} 🪙</div>
+        <button onclick="exchange('{{ p.product_name }}',{{ p.tokens }})" {% if tokens < p.tokens %}disabled{% endif %}>Обменять</button>
+    </div>
+</div>
+{% endfor %}
+<a href="/" class="back-btn">← На главную</a></div>
+<script>
+async function exchange(name, cost) {
+    if (!confirm('Обменять ' + name + ' за ' + cost + ' токенов?')) return;
+    var res = await fetch('/exchange', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({product_name: name, product_tokens: cost})
+    });
+    var data = await res.json();
+    alert(data.message);
+    if (data.success) location.href = '/history';
+}
+</script></body></html>
+'''
 
-@app.get("/admin/codes/export")
-async def export_codes():
-    with get_db() as db:
-        qr_codes = db.query(QRCode).all()
-        output = "Код,Статус,Токены\n" + "\n".join(f"{c.code},{c.status},{c.tokens_value}" for c in qr_codes)
-    return HTMLResponse(f"<pre>{output}</pre>")
+HISTORY_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>История призов</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.container{max-width:600px;margin:0 auto;background:rgba(255,255,255,0.95);border-radius:48px;padding:24px}
+table{width:100%;border-collapse:collapse}
+th,td{border-bottom:1px solid #ddd;padding:12px;text-align:left}
+th{background:#2c7a47;color:white}
+.prize-code{font-family:monospace;font-weight:bold;background:#f0f0f0;padding:4px 8px;border-radius:8px;cursor:pointer}
+.status-pending{color:orange}
+.status-completed{color:green}
+.back-btn{display:block;text-align:center;margin-top:20px;color:#1f6e43}
+.user-info{margin-bottom:15px;text-align:center}
+.nav-links{display:flex;gap:15px;justify-content:center;margin-bottom:15px}
+.nav-links a{color:#2c7a47;text-decoration:none}
+</style></head>
+<body><div class="container"><div class="user-info">👤 {{ login }} | <a href="/logout" style="color:#1f6e43;">Выйти</a></div>
+<div class="nav-links"><a href="/main">🏠 Главная</a> | <a href="/shop">🛒 Магазин</a> | <a href="/history">📜 История</a></div>
+<h2>📜 История полученных кодов</h2>
+{% if prizes %}
+<table>
+    <tr><th>Товар</th><th>Код для выдачи</th><th>Дата</th><th>Статус</th></tr>
+    {% for p in prizes %}
+    <tr>
+        <td>{{ p.product_name }}</td>
+        <td><span class="prize-code" onclick="copyToClipboard('{{ p.exchange_code }}')">{{ p.exchange_code }}</span> <button onclick="copyToClipboard('{{ p.exchange_code }}')" style="background:none;border:none;cursor:pointer;">📋</button></td>
+        <td>{{ p.created_at }}</td>
+        <td class="status-{{ p.status }}">{{ p.status }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<p style="margin-top:16px;font-size:12px;color:#666;">💡 Нажмите на код, чтобы скопировать</p>
+{% else %}
+<p style="text-align:center;padding:40px;">У вас пока нет обменянных призов</p>
+{% endif %}
+<a href="/" class="back-btn">← На главную</a></div>
+<script>
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => alert('Код скопирован: ' + text));
+}
+</script></body></html>
+'''
 
+ADMIN_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Админка</title><style>
+body{font-family:monospace;padding:20px;background:#f0f0f0}
+table{border-collapse:collapse;width:100%;background:white;margin-bottom:30px}
+th,td{border:1px solid #ddd;padding:8px;text-align:left}
+th{background:#4CAF50;color:white}
+.stats{background:#e0e0e0;padding:10px;margin-bottom:20px}
+h2{margin-top:30px}
+.btn-small{background:#2c7a47;color:white;padding:5px 10px;border:none;border-radius:5px;cursor:pointer}
+.status-pending{color:orange}
+.status-completed{color:green}
+</style></head>
+<body><h1>👑 Админ панель</h1>
+<div class="stats"><strong>Статистика кодов:</strong><br>Всего: {{ stats.total }} | Активных: {{ stats.active }} | Использованных: {{ stats.used }}</div>
+<h2>📦 Создать коды</h2>
+<form method="post" action="/admin/generate"><input type="number" name="count" value="10" min="1" max="100"> шт <input type="number" name="tokens" value="10" min="1"> токенов <button type="submit">Сгенерировать</button></form>
+<h2>📦 Заказы на выдачу</h2>
+<table>
+    <tr><th>ID</th><th>Клиент</th><th>Товар</th><th>Токенов</th><th>Код для выдачи</th><th>Дата</th><th>Статус</th><th>Действие</th></tr>
+    {% for req in prize_requests %}
+    <tr>
+        <td>{{ req.id }}</td>
+        <td>{{ req.login }}</td>
+        <td>{{ req.product_name }}</td>
+        <td>{{ req.product_tokens }}</td>
+        <td><strong>{{ req.exchange_code }}</strong></td>
+        <td>{{ req.created_at }}</td>
+        <td class="status-{{ req.status }}">{{ req.status }}</td>
+        <td>{% if req.status == 'pending' %}<form method="post" action="/admin/mark_delivered" style="margin:0"><input type="hidden" name="request_id" value="{{ req.id }}"><button type="submit" class="btn-small">✅ Выдано</button></form>{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+</table>
+<h2>👥 Пользователи</h2>
+<table>
+    <tr><th>ID</th><th>Логин</th><th>Пароль</th><th>Дата</th><th>Токенов</th></tr>
+    {% for u in users %}
+    <tr>
+        <td>{{ u.id }}</td>
+        <td>{{ u.login }}</td>
+        <td>{{ u.password }}</td>
+        <td>{{ u.created_at }}</td>
+        <td>{{ u.tokens }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<h2>🔑 QR коды</h2>
+<table>
+    <tr><th>ID</th><th>Код</th><th>Статус</th><th>Токены</th></tr>
+    {% for c in codes %}
+    <tr>
+        <td>{{ c.id }}</td>
+        <td>{{ c.code }}</td>
+        <td style="color: {% if c.status == 'active' %}green{% else %}red{% endif %}">{{ c.status }}</td>
+        <td>{{ c.tokens_value }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<a href="/">🏠 На главную</a> | <a href="/logout">🚪 Выйти</a></body></html>
+'''
 
-# ========== ЗАПУСК ==========
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.route('/')
+def index():
+    if current_user.is_authenticated:
+        return redirect('/main')
+    return render_template_string('''
+<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Fish Feed</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center}
+.container{text-align:center;background:rgba(255,255,255,0.9);border-radius:48px;padding:40px;max-width:350px}
+h1{font-size:32px;margin-bottom:30px}
+.btn{display:block;background:#2c7a47;color:white;padding:15px;margin:15px 0;border-radius:60px;text-decoration:none;font-weight:bold}
+.btn-outline{background:white;color:#2c7a47;border:2px solid #2c7a47}
+.fish{font-size:60px;margin-bottom:20px}
+</style></head><body><div class="container"><div class="fish">🐟</div><h1>Fish Feed Tokens</h1><p>Вводи коды с пачек корма и получай призы!</p><a href="/login" class="btn">🔐 Войти</a><a href="/register" class="btn btn-outline">📝 Зарегистрироваться</a></div></body></html>
+    ''')
+
+@app.route('/main')
+@login_required
+def main():
+    tokens = get_user_tokens(current_user.id)
+    progress = get_progress_info(tokens)
+    
+    return render_template_string(MAIN_PAGE, 
+        tokens=tokens, 
+        login=current_user.login,
+        fish_size=progress['current_level']['size'],
+        fish_icon=progress['current_level']['icon'],
+        next_level_name=progress['next_level']['name'],
+        tokens_to_next=progress['tokens_to_next'],
+        progress_percent=progress['percent'],
+        rewards=REWARDS)
+
+@app.route('/register', methods=['GET','POST'])
+def register_page():
+    if request.method == 'POST':
+        login = request.form.get('login','').strip()
+        pwd = request.form.get('password','').strip()
+        if not login or not pwd:
+            return render_template_string(REGISTER_PAGE, error='Заполните все поля')
+        if len(pwd) < 4:
+            return render_template_string(REGISTER_PAGE, error='❌ Пароль должен быть не менее 4 символов')
+        if len(pwd) > 30:
+            return render_template_string(REGISTER_PAGE, error='❌ Пароль не должен превышать 30 символов')
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT id FROM users WHERE login = ?', (login,))
+        if c.fetchone():
+            conn.close()
+            return render_template_string(REGISTER_PAGE, error='❌ Логин уже занят')
+        c.execute('INSERT INTO users (login, password, created_at) VALUES (?,?,?)', (login, pwd, datetime.now()))
+        conn.commit()
+        conn.close()
+        return render_template_string(REGISTER_PAGE, success='✅ Регистрация успешна! Теперь войдите.')
+    return render_template_string(REGISTER_PAGE, error=None)
+
+@app.route('/login', methods=['GET','POST'])
+def login_page():
+    if request.method == 'POST':
+        login = request.form.get('login','').strip()
+        pwd = request.form.get('password','').strip()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT id, login, password FROM users WHERE login = ?', (login,))
+        row = c.fetchone()
+        conn.close()
+        if row and row[2] == pwd:
+            user = User(row[0], row[1])
+            login_user(user)
+            return redirect('/main')
+        else:
+            return render_template_string(LOGIN_PAGE, error='❌ Неверный логин или пароль')
+    return render_template_string(LOGIN_PAGE, error=None)
+
+@app.route('/logout')
+@login_required
+def logout_page():
+    logout_user()
+    return redirect('/')
+
+@app.route('/activate', methods=['POST'])
+@login_required
+def activate():
+    code = request.form.get('code', '').strip().upper()
+    if not code:
+        return {'success': False, 'message': 'Введите код'}
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, status, tokens_value FROM qr_codes WHERE code = ?', (code,))
+    qr = c.fetchone()
+    if not qr:
+        conn.close()
+        return {'success': False, 'message': '❌ Неверный код'}
+    qr_id, status, tokens_value = qr
+    if status == 'used':
+        conn.close()
+        return {'success': False, 'message': '⚠️ Этот код уже был активирован'}
+    c.execute('SELECT id FROM transactions WHERE qr_code_id = ? AND user_id = ?', (qr_id, current_user.id))
+    if c.fetchone():
+        conn.close()
+        return {'success': False, 'message': '⚠️ Вы уже активировали этот код'}
+    c.execute('UPDATE qr_codes SET status = "used", scanned_at = ?, activated_by = ? WHERE id = ?', (datetime.now(), current_user.id, qr_id))
+    c.execute('INSERT INTO transactions (qr_code_id, user_id, tokens_awarded, scanned_at) VALUES (?,?,?,?)', (qr_id, current_user.id, tokens_value, datetime.now()))
+    c.execute('SELECT total_tokens FROM user_tokens WHERE user_id = ?', (current_user.id,))
+    row = c.fetchone()
+    if row:
+        new_tokens = row[0] + tokens_value
+        c.execute('UPDATE user_tokens SET total_tokens = ?, last_updated = ? WHERE user_id = ?', (new_tokens, datetime.now(), current_user.id))
+    else:
+        new_tokens = tokens_value
+        c.execute('INSERT INTO user_tokens (user_id, total_tokens, last_updated) VALUES (?,?,?)', (current_user.id, new_tokens, datetime.now()))
+    conn.commit()
+    conn.close()
+    return {'success': True, 'message': f'✅ Получено {tokens_value} токенов! Всего: {new_tokens}'}
+
+@app.route('/exchange', methods=['POST'])
+@login_required
+def exchange():
+    data = request.get_json()
+    product_name = data.get('product_name')
+    product_tokens = data.get('product_tokens')
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('SELECT total_tokens FROM user_tokens WHERE user_id = ?', (current_user.id,))
+    row = c.fetchone()
+    current_tokens = row[0] if row else 0
+    
+    if current_tokens < product_tokens:
+        conn.close()
+        return jsonify({'success': False, 'message': '❌ Недостаточно токенов'})
+    
+    new_tokens = current_tokens - product_tokens
+    c.execute('UPDATE user_tokens SET total_tokens = ?, last_updated = ? WHERE user_id = ?', (new_tokens, datetime.now(), current_user.id))
+    
+    exchange_code = generate_exchange_code()
+    c.execute('INSERT INTO prize_requests (user_id, product_name, product_tokens, exchange_code, status, created_at) VALUES (?,?,?,?,?,?)',
+              (current_user.id, product_name, product_tokens, exchange_code, 'pending', datetime.now()))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'message': f'🎉 Товар "{product_name}" заказан! Ваш код: {exchange_code}. Покажите его продавцу.'})
+
+@app.route('/shop')
+@login_required
+def shop():
+    tokens = get_user_tokens(current_user.id)
+    products = get_shop_products()
+    return render_template_string(SHOP_PAGE, tokens=tokens, products=products, login=current_user.login)
+
+@app.route('/history')
+@login_required
+def history():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT product_name, exchange_code, status, created_at FROM prize_requests WHERE user_id = ? ORDER BY id DESC', (current_user.id,))
+    prizes = [{'product_name': row[0], 'exchange_code': row[1], 'status': row[2], 'created_at': row[3]} for row in c.fetchall()]
+    conn.close()
+    return render_template_string(HISTORY_PAGE, prizes=prizes, login=current_user.login)
+
+@app.route('/admin', methods=['GET'])
+def admin():
+    password = request.args.get('password', '')
+    if password != 'albek123':
+        return 'Доступ запрещён. Используйте ?password=albek123'
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('SELECT id, code, status, tokens_value, activated_by FROM qr_codes ORDER BY id DESC')
+    codes = [{'id': row[0], 'code': row[1], 'status': row[2], 'tokens_value': row[3], 'activated_by': row[4]} for row in c.fetchall()]
+    
+    c.execute('SELECT COUNT(*) FROM qr_codes')
+    total = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM qr_codes WHERE status = "active"')
+    active = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM qr_codes WHERE status = "used"')
+    used = c.fetchone()[0]
+    
+    c.execute('SELECT u.id, u.login, u.password, u.created_at, COALESCE(ut.total_tokens, 0) FROM users u LEFT JOIN user_tokens ut ON u.id = ut.user_id ORDER BY u.id DESC')
+    users = [{'id': row[0], 'login': row[1], 'password': row[2], 'created_at': row[3], 'tokens': row[4]} for row in c.fetchall()]
+    
+    c.execute('''SELECT pr.id, u.login, pr.product_name, pr.product_tokens, pr.exchange_code, pr.status, pr.created_at 
+                 FROM prize_requests pr JOIN users u ON pr.user_id = u.id ORDER BY pr.id DESC''')
+    prize_requests = [{'id': row[0], 'login': row[1], 'product_name': row[2], 'product_tokens': row[3], 'exchange_code': row[4], 'status': row[5], 'created_at': row[6]} for row in c.fetchall()]
+    
+    conn.close()
+    return render_template_string(ADMIN_PAGE, codes=codes, stats={'total': total, 'active': active, 'used': used}, users=users, prize_requests=prize_requests)
+
+@app.route('/admin/generate', methods=['POST'])
+def generate():
+    count = min(int(request.form.get('count', 10)), 100)
+    tokens_value = int(request.form.get('tokens', 10))
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    for _ in range(count):
+        code = generate_unique_code()
+        c.execute('INSERT INTO qr_codes (code, status, tokens_value) VALUES (?,?,?)', (code, 'active', tokens_value))
+    conn.commit()
+    conn.close()
+    return redirect('/admin?password=albek123')
+
+@app.route('/admin/mark_delivered', methods=['POST'])
+def mark_delivered():
+    request_id = request.form.get('request_id')
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('UPDATE prize_requests SET status = "completed" WHERE id = ?', (request_id,))
+    conn.commit()
+    conn.close()
+    return redirect('/admin?password=albek123')
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000)
