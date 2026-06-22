@@ -1,0 +1,233 @@
+REGISTER_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Регистрация</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.container{max-width:400px;margin:50px auto;background:white;border-radius:48px;padding:30px;text-align:center}
+input{width:100%;padding:12px;margin:10px 0;border-radius:30px;border:1px solid #ccc}
+button{background:#2c7a47;color:white;padding:12px;border:none;border-radius:30px;width:100%;cursor:pointer}
+.error{color:red}
+.success{color:green}
+.back{margin-top:20px;display:block;color:#1f6e43}
+</style></head>
+<body><div class="container"><h1>📝 Регистрация</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if success %}<p class="success">{{ success }}</p>{% endif %}
+<form method="post"><input type="text" name="login" placeholder="Логин" required><input type="password" name="password" placeholder="Пароль (от 4 до 30 символов)" required><button type="submit">Зарегистрироваться</button></form>
+<a href="/login" class="back">Уже есть аккаунт? Войти</a><a href="/" class="back">← На главную</a></div></body></html>
+'''
+
+LOGIN_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Вход</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.container{max-width:400px;margin:50px auto;background:white;border-radius:48px;padding:30px;text-align:center}
+input{width:100%;padding:12px;margin:10px 0;border-radius:30px;border:1px solid #ccc}
+button{background:#2c7a47;color:white;padding:12px;border:none;border-radius:30px;width:100%;cursor:pointer}
+.error{color:red}
+.back{margin-top:20px;display:block;color:#1f6e43}
+</style></head>
+<body><div class="container"><h1>🔐 Вход</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post"><input type="text" name="login" placeholder="Логин" required><input type="password" name="password" placeholder="Пароль" required><button type="submit">Войти</button></form>
+<a href="/register" class="back">Нет аккаунта? Зарегистрироваться</a><a href="/" class="back">← На главную</a></div></body></html>
+'''
+
+MAIN_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Fish Feed</title><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);min-height:100vh;display:flex;justify-content:center;align-items:center;font-family:sans-serif;padding:12px}
+.lake-card{max-width:500px;width:100%;background:rgba(255,255,255,0.3);backdrop-filter:blur(2px);border-radius:48px;padding:16px}
+.lake{background:radial-gradient(circle at 30% 40%,#3b9ec7,#1e6f96);border-radius:80px;min-height:280px;display:flex;justify-content:center;align-items:center;margin-bottom:20px;position:relative;overflow:hidden}
+.lake::before{content:"";position:absolute;bottom:0;width:100%;height:40px;background:repeating-linear-gradient(transparent 0px,transparent 18px,rgba(255,255,240,0.2) 18px,rgba(255,255,240,0.3) 28px)}
+.fish{transition:all 0.3s;filter:drop-shadow(0 8px 12px rgba(0,0,0,0.2))}
+.balance-panel{background:white;border-radius:60px;padding:12px;text-align:center;margin-bottom:20px}
+.token-count{font-size:44px;font-weight:800;color:#f5b042}
+.next-reward{background:rgba(255,255,245,0.95);border-radius:32px;padding:14px;margin-bottom:20px}
+.progress-bar-bg{background:#e0e7e3;border-radius:40px;height:12px;margin:10px 0;overflow:hidden}
+.progress-fill{background:#ffb347;width:0%;height:100%;transition:width 0.3s}
+.actions{display:flex;gap:12px;margin-top:8px}
+.btn{flex:1;text-align:center;padding:14px 0;border-radius:60px;font-weight:600;text-decoration:none;background:white;color:#1f6e43;cursor:pointer;border:none}
+.btn-primary{background:#2c7a47;color:white;box-shadow:0 4px 0 #1b5230}
+.code-input{width:100%;padding:12px;border-radius:60px;border:none;text-align:center;font-family:monospace;margin-top:10px}
+.milestones{margin-top:20px;background:rgba(255,255,250,0.85);border-radius:32px;padding:12px}
+.milestone-item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.05)}
+.milestone-name{display:flex;align-items:center;gap:8px}
+.milestone-tokens{font-family:monospace;min-width:60px;text-align:right}
+.user-info{margin-bottom:15px;font-size:14px;color:#2c7a47;text-align:center}
+.nav-links{display:flex;gap:15px;justify-content:center;margin-bottom:10px}
+.nav-links a{color:#2c7a47;text-decoration:none}
+</style></head>
+<body><div class="lake-card"><div class="user-info">👤 {{ login }} | <a href="/logout" style="color:#2c7a47;">Выйти</a></div>
+<div class="nav-links"><a href="/main">🏠 Главная</a> | <a href="/shop">🛒 Магазин</a> | <a href="/history">📜 История</a></div>
+<div class="lake"><div class="fish" id="fishEmoji" style="font-size: {{ fish_size }}px;">{{ fish_icon }}</div></div>
+<div class="balance-panel"><div class="token-count">{{ tokens }} 🪙</div></div>
+<div class="next-reward"><div>🎁 Следующая награда: {{ next_level_name }}</div><div>Осталось: {{ tokens_to_next }} 🪙</div><div class="progress-bar-bg"><div class="progress-fill" style="width: {{ progress_percent }}%;"></div></div></div>
+<div class="actions"><button onclick="showInput()" class="btn btn-primary">🔑 Ввести код</button></div>
+<div id="codeInputArea" style="display:none;"><input type="text" id="codeInput" class="code-input" placeholder="Введите код с пачки"><button onclick="submitCode()" class="btn btn-primary" style="margin-top:10px;">Активировать</button></div>
+<div class="milestones"><div>🐟 Размер рыбы:</div>
+{% for r in rewards %}
+<div class="milestone-item">
+    <div class="milestone-name">{{ r.icon }} {{ r.name }}</div>
+    <div class="milestone-tokens">{{ r.tokens }} 🪙</div>
+</div>
+{% endfor %}
+</div></div>
+<script>
+function showInput(){var a=document.getElementById('codeInputArea');a.style.display=a.style.display==='none'?'block':'none'}
+async function submitCode(){var c=document.getElementById('codeInput').value.trim().toUpperCase();if(!c){alert('Введите код');return}
+var r=await fetch('/activate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'code='+encodeURIComponent(c)})
+var d=await r.json();alert(d.message);if(d.success)location.reload()}
+</script></body></html>
+'''
+
+SHOP_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Магазин</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.shop-container{max-width:500px;margin:0 auto;background:rgba(255,255,255,0.9);border-radius:48px;padding:24px}
+.balance{background:#2c7a47;color:white;padding:16px;border-radius:60px;text-align:center;margin-bottom:24px}
+.product{background:white;border-radius:24px;padding:16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
+button{background:#2c7a47;color:white;border:none;padding:10px 20px;border-radius:40px;cursor:pointer}
+button:disabled{background:#ccc}
+.back-btn{display:block;text-align:center;margin-top:20px;color:#1f6e43}
+.user-info{margin-bottom:15px;font-size:14px;text-align:center}
+.nav-links{display:flex;gap:15px;justify-content:center;margin-bottom:15px}
+.nav-links a{color:#2c7a47;text-decoration:none}
+</style></head>
+<body><div class="shop-container"><div class="user-info">👤 {{ login }} | <a href="/logout" style="color:#1f6e43;">Выйти</a></div>
+<div class="nav-links"><a href="/main">🏠 Главная</a> | <a href="/shop">🛒 Магазин</a> | <a href="/history">📜 История</a></div>
+<div class="balance">💰 Ваши токены: {{ tokens }} 🪙</div>
+<p style="margin-bottom:16px;">🎁 Обменяйте токены на товары:</p>
+{% for p in products %}
+<div class="product">
+    <div>
+        <strong>{{ p.fish_icon }} = {{ p.product_name }}</strong>
+    </div>
+    <div style="text-align:right;">
+        <div>{{ p.tokens }} 🪙</div>
+        <button onclick="exchange('{{ p.product_name }}',{{ p.tokens }})" {% if tokens < p.tokens %}disabled{% endif %}>Обменять</button>
+    </div>
+</div>
+{% endfor %}
+<a href="/" class="back-btn">← На главную</a></div>
+<script>
+async function exchange(name, cost) {
+    if (!confirm('Обменять ' + name + ' за ' + cost + ' токенов?')) return;
+    var res = await fetch('/exchange', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({product_name: name, product_tokens: cost})
+    });
+    var data = await res.json();
+    alert(data.message);
+    if (data.success) location.href = '/history';
+}
+</script></body></html>
+'''
+
+HISTORY_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>История призов</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;padding:20px}
+.container{max-width:600px;margin:0 auto;background:rgba(255,255,255,0.95);border-radius:48px;padding:24px}
+table{width:100%;border-collapse:collapse}
+th,td{border-bottom:1px solid #ddd;padding:12px;text-align:left}
+th{background:#2c7a47;color:white}
+.prize-code{font-family:monospace;font-weight:bold;background:#f0f0f0;padding:4px 8px;border-radius:8px;cursor:pointer}
+.status-pending{color:orange}
+.status-completed{color:green}
+.back-btn{display:block;text-align:center;margin-top:20px;color:#1f6e43}
+.user-info{margin-bottom:15px;text-align:center}
+.nav-links{display:flex;gap:15px;justify-content:center;margin-bottom:15px}
+.nav-links a{color:#2c7a47;text-decoration:none}
+</style></head>
+<body><div class="container"><div class="user-info">👤 {{ login }} | <a href="/logout" style="color:#1f6e43;">Выйти</a></div>
+<div class="nav-links"><a href="/main">🏠 Главная</a> | <a href="/shop">🛒 Магазин</a> | <a href="/history">📜 История</a></div>
+<h2>📜 История полученных кодов</h2>
+{% if prizes %}
+<table>
+    <tr><th>Товар</th><th>Код для выдачи</th><th>Дата</th><th>Статус</th></tr>
+    {% for p in prizes %}
+    <tr>
+        <td>{{ p.product_name }}</td>
+        <td><span class="prize-code" onclick="copyToClipboard('{{ p.exchange_code }}')">{{ p.exchange_code }}</span> <button onclick="copyToClipboard('{{ p.exchange_code }}')" style="background:none;border:none;cursor:pointer;">📋</button></td>
+        <td>{{ p.created_at }}</td>
+        <td class="status-{{ p.status }}">{{ p.status }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<p style="margin-top:16px;font-size:12px;color:#666;">💡 Нажмите на код, чтобы скопировать</p>
+{% else %}
+<p style="text-align:center;padding:40px;">У вас пока нет обменянных призов</p>
+{% endif %}
+<a href="/" class="back-btn">← На главную</a></div>
+<script>
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => alert('Код скопирован: ' + text));
+}
+</script></body></html>
+'''
+
+ADMIN_PAGE = '''
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Админка</title><style>
+body{font-family:monospace;padding:20px;background:#f0f0f0}
+table{border-collapse:collapse;width:100%;background:white;margin-bottom:30px}
+th,td{border:1px solid #ddd;padding:8px;text-align:left}
+th{background:#4CAF50;color:white}
+.stats{background:#e0e0e0;padding:10px;margin-bottom:20px}
+h2{margin-top:30px}
+.btn-small{background:#2c7a47;color:white;padding:5px 10px;border:none;border-radius:5px;cursor:pointer}
+.status-pending{color:orange}
+.status-completed{color:green}
+</style></head>
+<body><h1>👑 Админ панель</h1>
+<div class="stats"><strong>Статистика кодов:</strong><br>Всего: {{ stats.total }} | Активных: {{ stats.active }} | Использованных: {{ stats.used }}</div>
+<h2>📦 Создать коды</h2>
+<form method="post" action="/admin/generate"><input type="number" name="count" value="10" min="1" max="100"> шт <input type="number" name="tokens" value="10" min="1"> токенов <button type="submit">Сгенерировать</button></form>
+<h2>📦 Заказы на выдачу</h2>
+<table>
+    <tr><th>ID</th><th>Клиент</th><th>Товар</th><th>Токенов</th><th>Код для выдачи</th><th>Дата</th><th>Статус</th><th>Действие</th></tr>
+    {% for req in prize_requests %}
+    <tr>
+        <td>{{ req.id }}</td>
+        <td>{{ req.login }}</td>
+        <td>{{ req.product_name }}</td>
+        <td>{{ req.product_tokens }}</td>
+        <td><strong>{{ req.exchange_code }}</strong></td>
+        <td>{{ req.created_at }}</td>
+        <td class="status-{{ req.status }}">{{ req.status }}</td>
+        <td>{% if req.status == 'pending' %}<form method="post" action="/admin/mark_delivered" style="margin:0"><input type="hidden" name="request_id" value="{{ req.id }}"><button type="submit" class="btn-small">✅ Выдано</button></form>{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+</table>
+<h2>👥 Пользователи</h2>
+<table>
+    <tr><th>ID</th><th>Логин</th><th>Пароль</th><th>Дата</th><th>Токенов</th></tr>
+    {% for u in users %}
+    <tr>
+        <td>{{ u.id }}</td>
+        <td>{{ u.login }}</td>
+        <td>{{ u.password }}</td>
+        <td>{{ u.created_at }}</td>
+        <td>{{ u.tokens }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<h2>🔑 QR коды</h2>
+<table>
+    <tr><th>ID</th><th>Код</th><th>Статус</th><th>Токены</th></tr>
+    {% for c in codes %}
+    <tr>
+        <td>{{ c.id }}</td>
+        <td>{{ c.code }}</td>
+        <td style="color: {% if c.status == 'active' %}green{% else %}red{% endif %}">{{ c.status }}</td>
+        <td>{{ c.tokens_value }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<a href="/">🏠 На главную</a> | <a href="/logout">🚪 Выйти</a></body></html>
+'''

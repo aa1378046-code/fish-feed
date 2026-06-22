@@ -1,0 +1,220 @@
+from flask import request, redirect, render_template_string, jsonify
+from flask_login import login_user, logout_user, login_required, current_user
+import sqlite3
+from datetime import datetime
+from database import DB_PATH, get_user_tokens
+from templates import REGISTER_PAGE, LOGIN_PAGE, MAIN_PAGE, SHOP_PAGE, HISTORY_PAGE, ADMIN_PAGE
+from app import REWARDS, get_shop_products, get_progress_info, generate_unique_code, generate_exchange_code, load_user, User
+
+def init_routes(app, login_manager):
+
+    @app.route('/register', methods=['GET','POST'])
+    def register_page():
+        if request.method == 'POST':
+            login = request.form.get('login','').strip()
+            pwd = request.form.get('password','').strip()
+            if not login or not pwd:
+                return render_template_string(REGISTER_PAGE, error='Заполните все поля')
+            if len(pwd) < 4:
+                return render_template_string(REGISTER_PAGE, error='❌ Пароль должен быть не менее 4 символов')
+            if len(pwd) > 30:
+                return render_template_string(REGISTER_PAGE, error='❌ Пароль не должен превышать 30 символов')
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute('SELECT id FROM users WHERE login = ?', (login,))
+            if c.fetchone():
+                conn.close()
+                return render_template_string(REGISTER_PAGE, error='❌ Логин уже занят')
+            c.execute('INSERT INTO users (login, password, created_at) VALUES (?,?,?)', (login, pwd, datetime.now()))
+            conn.commit()
+            conn.close()
+            return render_template_string(REGISTER_PAGE, success='✅ Регистрация успешна! Теперь войдите.')
+        return render_template_string(REGISTER_PAGE, error=None)
+
+    @app.route('/login', methods=['GET','POST'])
+    def login_page():
+        if request.method == 'POST':
+            login = request.form.get('login','').strip()
+            pwd = request.form.get('password','').strip()
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute('SELECT id, login, password FROM users WHERE login = ?', (login,))
+            row = c.fetchone()
+            conn.close()
+            if row and row[2] == pwd:
+                user = load_user(row[0])
+                login_user(user)
+                return redirect('/main')
+            else:
+                return render_template_string(LOGIN_PAGE, error='❌ Неверный логин или пароль')
+        return render_template_string(LOGIN_PAGE, error=None)
+
+    @app.route('/logout')
+    @login_required
+    def logout_page():
+        logout_user()
+        return redirect('/')
+
+    @app.route('/')
+    def index():
+        if current_user.is_authenticated:
+            return redirect('/main')
+        return render_template_string('''
+<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Fish Feed</title><style>
+body{background:linear-gradient(160deg,#d4f1f9,#a0d8ef);font-family:sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center}
+.container{text-align:center;background:rgba(255,255,255,0.9);border-radius:48px;padding:40px;max-width:350px}
+h1{font-size:32px;margin-bottom:30px}
+.btn{display:block;background:#2c7a47;color:white;padding:15px;margin:15px 0;border-radius:60px;text-decoration:none;font-weight:bold}
+.btn-outline{background:white;color:#2c7a47;border:2px solid #2c7a47}
+.fish{font-size:60px;margin-bottom:20px}
+</style></head><body><div class="container"><div class="fish">🐟</div><h1>Fish Feed Tokens</h1><p>Вводи коды с пачек корма и получай призы!</p><a href="/login" class="btn">🔐 Войти</a><a href="/register" class="btn btn-outline">📝 Зарегистрироваться</a></div></body></html>
+        ''')
+
+    @app.route('/main')
+    @login_required
+    def main():
+        tokens = get_user_tokens(current_user.id)
+        progress = get_progress_info(tokens)
+        
+        return render_template_string(MAIN_PAGE, 
+            tokens=tokens, 
+            login=current_user.login,
+            fish_size=progress['current_level']['size'],
+            fish_icon=progress['current_level']['icon'],
+            next_level_name=progress['next_level']['name'],
+            tokens_to_next=progress['tokens_to_next'],
+            progress_percent=progress['percent'],
+            rewards=REWARDS)
+
+    @app.route('/shop')
+    @login_required
+    def shop():
+        tokens = get_user_tokens(current_user.id)
+        products = get_shop_products()
+        return render_template_string(SHOP_PAGE, tokens=tokens, products=products, login=current_user.login)
+
+    @app.route('/history')
+    @login_required
+    def history():
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT product_name, exchange_code, status, created_at FROM prize_requests WHERE user_id = ? ORDER BY id DESC', (current_user.id,))
+        prizes = [{'product_name': row[0], 'exchange_code': row[1], 'status': row[2], 'created_at': row[3]} for row in c.fetchall()]
+        conn.close()
+        return render_template_string(HISTORY_PAGE, prizes=prizes, login=current_user.login)
+
+    @app.route('/activate', methods=['POST'])
+    @login_required
+    def activate():
+        code = request.form.get('code', '').strip().upper()
+        if not code:
+            return {'success': False, 'message': 'Введите код'}
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT id, status, tokens_value FROM qr_codes WHERE code = ?', (code,))
+        qr = c.fetchone()
+        if not qr:
+            conn.close()
+            return {'success': False, 'message': '❌ Неверный код'}
+        qr_id, status, tokens_value = qr
+        if status == 'used':
+            conn.close()
+            return {'success': False, 'message': '⚠️ Этот код уже был активирован'}
+        c.execute('SELECT id FROM transactions WHERE qr_code_id = ? AND user_id = ?', (qr_id, current_user.id))
+        if c.fetchone():
+            conn.close()
+            return {'success': False, 'message': '⚠️ Вы уже активировали этот код'}
+        c.execute('UPDATE qr_codes SET status = "used", scanned_at = ?, activated_by = ? WHERE id = ?', (datetime.now(), current_user.id, qr_id))
+        c.execute('INSERT INTO transactions (qr_code_id, user_id, tokens_awarded, scanned_at) VALUES (?,?,?,?)', (qr_id, current_user.id, tokens_value, datetime.now()))
+        c.execute('SELECT total_tokens FROM user_tokens WHERE user_id = ?', (current_user.id,))
+        row = c.fetchone()
+        if row:
+            new_tokens = row[0] + tokens_value
+            c.execute('UPDATE user_tokens SET total_tokens = ?, last_updated = ? WHERE user_id = ?', (new_tokens, datetime.now(), current_user.id))
+        else:
+            new_tokens = tokens_value
+            c.execute('INSERT INTO user_tokens (user_id, total_tokens, last_updated) VALUES (?,?,?)', (current_user.id, new_tokens, datetime.now()))
+        conn.commit()
+        conn.close()
+        return {'success': True, 'message': f'✅ Получено {tokens_value} токенов! Всего: {new_tokens}'}
+
+    @app.route('/exchange', methods=['POST'])
+    @login_required
+    def exchange():
+        data = request.get_json()
+        product_name = data.get('product_name')
+        product_tokens = data.get('product_tokens')
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        c.execute('SELECT total_tokens FROM user_tokens WHERE user_id = ?', (current_user.id,))
+        row = c.fetchone()
+        current_tokens = row[0] if row else 0
+        
+        if current_tokens < product_tokens:
+            conn.close()
+            return jsonify({'success': False, 'message': '❌ Недостаточно токенов'})
+        
+        new_tokens = current_tokens - product_tokens
+        c.execute('UPDATE user_tokens SET total_tokens = ?, last_updated = ? WHERE user_id = ?', (new_tokens, datetime.now(), current_user.id))
+        
+        exchange_code = generate_exchange_code()
+        c.execute('INSERT INTO prize_requests (user_id, product_name, product_tokens, exchange_code, status, created_at) VALUES (?,?,?,?,?,?)',
+                  (current_user.id, product_name, product_tokens, exchange_code, 'pending', datetime.now()))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True, 'message': f'🎉 Товар "{product_name}" заказан! Ваш код: {exchange_code}. Покажите его продавцу.'})
+
+    @app.route('/admin', methods=['GET'])
+    def admin():
+        password = request.args.get('password', '')
+        if password != 'albek123':
+            return 'Доступ запрещён. Используйте ?password=albek123'
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        c.execute('SELECT id, code, status, tokens_value, activated_by FROM qr_codes ORDER BY id DESC')
+        codes = [{'id': row[0], 'code': row[1], 'status': row[2], 'tokens_value': row[3], 'activated_by': row[4]} for row in c.fetchall()]
+        
+        c.execute('SELECT COUNT(*) FROM qr_codes')
+        total = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM qr_codes WHERE status = "active"')
+        active = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM qr_codes WHERE status = "used"')
+        used = c.fetchone()[0]
+        
+        c.execute('SELECT u.id, u.login, u.password, u.created_at, COALESCE(ut.total_tokens, 0) FROM users u LEFT JOIN user_tokens ut ON u.id = ut.user_id ORDER BY u.id DESC')
+        users = [{'id': row[0], 'login': row[1], 'password': row[2], 'created_at': row[3], 'tokens': row[4]} for row in c.fetchall()]
+        
+        c.execute('''SELECT pr.id, u.login, pr.product_name, pr.product_tokens, pr.exchange_code, pr.status, pr.created_at 
+                     FROM prize_requests pr JOIN users u ON pr.user_id = u.id ORDER BY pr.id DESC''')
+        prize_requests = [{'id': row[0], 'login': row[1], 'product_name': row[2], 'product_tokens': row[3], 'exchange_code': row[4], 'status': row[5], 'created_at': row[6]} for row in c.fetchall()]
+        
+        conn.close()
+        return render_template_string(ADMIN_PAGE, codes=codes, stats={'total': total, 'active': active, 'used': used}, users=users, prize_requests=prize_requests)
+
+    @app.route('/admin/generate', methods=['POST'])
+    def generate():
+        count = min(int(request.form.get('count', 10)), 100)
+        tokens_value = int(request.form.get('tokens', 10))
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        for _ in range(count):
+            code = generate_unique_code()
+            c.execute('INSERT INTO qr_codes (code, status, tokens_value) VALUES (?,?,?)', (code, 'active', tokens_value))
+        conn.commit()
+        conn.close()
+        return redirect('/admin?password=albek123')
+
+    @app.route('/admin/mark_delivered', methods=['POST'])
+    def mark_delivered():
+        request_id = request.form.get('request_id')
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('UPDATE prize_requests SET status = "completed" WHERE id = ?', (request_id,))
+        conn.commit()
+        conn.close()
+        return redirect('/admin?password=albek123')
